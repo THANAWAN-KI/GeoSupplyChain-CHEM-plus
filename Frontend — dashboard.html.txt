@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <title>GeoSupplyChain-CHEM+ Dashboard</title>
+  <script
+    type="module"
+    src="https://js.arcgis.com/embeddable-components/4.32/arcgis-embeddable-components.esm.js"
+  ></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      margin: 0; padding: 0; display: flex; height: 100vh;
+      overflow: hidden;
+    }
+    #mapContainer {
+      flex: 2;
+      min-width: 50%;
+      height: 100vh;
+    }
+    #sidebar {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      padding: 15px;
+      box-sizing: border-box;
+      overflow-y: auto;
+      background: #f9f9f9;
+      border-left: 1px solid #ccc;
+    }
+    h2 {
+      margin-top: 0;
+      margin-bottom: 15px;
+      font-weight: 600;
+    }
+    #riskChart {
+      width: 100%;
+      height: 250px;
+      margin-bottom: 20px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    th, td {
+      border: 1px solid #ddd;
+      padding: 8px;
+      text-align: left;
+    }
+    th {
+      background: #0078d7;
+      color: white;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+    tr:nth-child(even) {
+      background: #f1f1f1;
+    }
+    .risk-low {
+      color: green;
+      font-weight: bold;
+    }
+    .risk-medium {
+      color: orange;
+      font-weight: bold;
+    }
+    .risk-high {
+      color: red;
+      font-weight: bold;
+    }
+    #refreshBtn {
+      margin-top: auto;
+      padding: 10px 15px;
+      background: #0078d7;
+      color: white;
+      border: none;
+      cursor: pointer;
+      font-size: 16px;
+      border-radius: 4px;
+    }
+    #refreshBtn:hover {
+      background: #005ea6;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="mapContainer">
+    <arcgis-embedded-map
+      id="arcgisMap"
+      style="height: 100vh; width: 100%;"
+      item-id="06ec761bdc39427b877969659bf7f026"
+      theme="light"
+      bookmarks-enabled
+      heading-enabled
+      legend-enabled
+      information-enabled
+      share-enabled
+      portal-url="https://ieat.maps.arcgis.com"
+    ></arcgis-embedded-map>
+  </div>
+
+  <div id="sidebar">
+    <h2>สถิติความเสี่ยงเซ็นเซอร์</h2>
+    <canvas id="riskChart"></canvas>
+
+    <h2>ข้อมูลเซ็นเซอร์</h2>
+    <table id="sensorTable">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>ตำแหน่ง (Lat, Long)</th>
+          <th>อุณหภูมิ (°C)</th>
+          <th>ความชื้น (%)</th>
+          <th>ระดับสารเคมี</th>
+          <th>สถานะความเสี่ยง</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <button id="refreshBtn">รีเฟรชข้อมูล</button>
+  </div>
+
+  <script type="module">
+    import { loadArcGISModules } from "https://js.arcgis.com/embeddable-components/4.32/arcgis-embeddable-components.esm.js";
+
+    // Basic Auth สำหรับ API
+    const username = 'admin';
+    const password = 'yourpassword';
+    const basicAuth = 'Basic ' + btoa(username + ':' + password);
+
+    let riskChart;
+    let sensorLayer;
+
+    async function fetchSensorData() {
+      try {
+        const res = await fetch('http://localhost:5000/api/sensor-data', {
+          headers: { 'Authorization': basicAuth }
+        });
+        if (!res.ok) throw new Error('Failed to fetch sensor data');
+        const data = await res.json();
+        return data;
+      } catch (err) {
+        console.error(err);
+        return [];
+      }
+    }
+
+    function getRiskClass(risk) {
+      if (risk === 'High Risk') return 'risk-high';
+      if (risk === 'Low Risk') return 'risk-low';
+      if (risk === 'Medium Risk') return 'risk-medium';
+      return '';
+    }
+
+    async function updateDashboard(sensors) {
+      const [Graphic, GraphicsLayer] = await loadArcGISModules([
+        "esri/Graphic",
+        "esri/layers/GraphicsLayer"
+      ]);
+
+      if (!sensorLayer) {
+        const mapElement = document.getElementById("arcgisMap");
+        const mapView = await mapElement.getMapView();
+        sensorLayer = new GraphicsLayer({ title: "IoT Sensors" });
+        mapView.map.add(sensorLayer);
+      }
+
+      // เคลียร์จุดเก่า
+      sensorLayer.removeAll();
+
+      sensors.forEach(sensor => {
+        let riskColor = {
+          "High Risk": "red",
+          "Low Risk": "green",
+          "Medium Risk": "orange"
+        }[sensor.risk_level] || "gray";
+
+        const graphic = new Graphic({
+          geometry: {
+            type: "point",
+            longitude: sensor.longitude,
+            latitude: sensor.latitude
+          },
+          symbol: {
+            type: "simple-marker",
+            color: riskColor,
+            size: "14px",
+            outline: { color: "white", width: 1 }
+          },
+          attributes: sensor,
+          popupTemplate: {
+            title: `Sensor ID: ${sensor.sensor_id}`,
+            content: `
+              <b>Temperature:</b> ${sensor.temperature} °C<br>
+              <b>Humidity:</b> ${sensor.humidity} %<br>
+              <b>Chemical Level:</b> ${sensor.chemical_level}<br>
+              <b>Risk Level:</b> ${sensor.risk_level}
+            `
+          }
+        });
+        sensorLayer.add(graphic);
+      });
+
+      // อัปเดตกราฟ
+      const counts = sensors.reduce((acc, s) => {
+        acc[s.risk_level] = (acc[s.risk_level] || 0) + 1;
+        return acc;
+      }, {});
+
+      const labels = ["High Risk", "Medium Risk", "Low Risk"];
+      const data = labels.map(label => counts[label] || 0);
+
+      if (riskChart) {
+        riskChart.data.datasets[0].data = data;
+        riskChart.update();
+      } else {
+        const ctx = document.getElementById('riskChart').getContext('2d');
+        riskChart = new Chart(ctx, {
+          type: 'doughnut',
+          data: {
+            labels,
+            datasets: [{
+              label: 'จำนวนเซ็นเซอร์',
+              data,
+              backgroundColor: ['red', 'orange', 'green'],
+            }]
+          },
+          options: {
+            responsive: true,
+            plugins: {
+              legend: { position: 'bottom' }
+            }
+          }
+        });
+      }
+
+      // อัปเดตตาราง
+      const tbody = document.querySelector('#sensorTable tbody');
+      tbody.innerHTML = '';
+      sensors.forEach(sensor => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${sensor.sensor_id}</td>
+          <td>${sensor.latitude.toFixed(4)}, ${sensor.longitude.toFixed(4)}</td>
+          <td>${sensor.temperature}</td>
+          <td>${sensor.humidity}</td>
+          <td>${sensor.chemical_level}</td>
+          <td class="${getRiskClass(sensor.risk_level)}">${sensor.risk_level}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    async function refreshData() {
+      const sensors = await fetchSensorData();
+      await updateDashboard(sensors);
+    }
+
+    document.getElementById('refreshBtn').addEventListener('click', refreshData);
+
+    // รีเฟรชอัตโนมัติทุก 30 วินาที
+    setInterval(refreshData, 30000);
+
+    // โหลดข้อมูลครั้งแรกตอนเปิดหน้า
+    refreshData();
+  </script>
+</body>
+</html>

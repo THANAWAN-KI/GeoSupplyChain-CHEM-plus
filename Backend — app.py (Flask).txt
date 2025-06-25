@@ -1,0 +1,128 @@
+from flask import Flask, request, jsonify
+from flask_httpauth import HTTPBasicAuth
+from werkzeug.security import generate_password_hash, check_password_hash
+from threading import Thread
+import joblib
+import requests
+from twilio.rest import Client
+from flask_sqlalchemy import SQLAlchemy
+from datetime import datetime
+
+app = Flask(__name__)
+auth = HTTPBasicAuth()
+
+# Database config - แก้ตามของจริง
+app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://user:password@localhost:5432/geo_supplychain'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+db = SQLAlchemy(app)
+
+# User credentials (Basic Auth)
+users = {
+    "admin": generate_password_hash("yourpassword"),
+    "user1": generate_password_hash("user1pass")
+}
+
+@auth.verify_password
+def verify_password(username, password):
+    if username in users and check_password_hash(users.get(username), password):
+        return username
+
+# AI Model โหลด (เตรียมโมเดลด้วย joblib)
+model = joblib.load('risk_model.pkl')
+
+# Line Notify, Twilio Config
+LINE_NOTIFY_TOKEN = 'YOUR_LINE_NOTIFY_TOKEN'
+TWILIO_SID = 'YOUR_TWILIO_ACCOUNT_SID'
+TWILIO_AUTH_TOKEN = 'YOUR_TWILIO_AUTH_TOKEN'
+TWILIO_FROM_PHONE = '+1234567890'
+TWILIO_TO_PHONE = '+66812345678'
+
+def send_line_notify(token, message):
+    url = 'https://notify-api.line.me/api/notify'
+    headers = {'Authorization': f'Bearer {token}'}
+    data = {'message': message}
+    resp = requests.post(url, headers=headers, data=data)
+    return resp.status_code == 200
+
+def send_sms_twilio(message):
+    client = Client(TWILIO_SID, TWILIO_AUTH_TOKEN)
+    msg = client.messages.create(
+        body=message,
+        from_=TWILIO_FROM_PHONE,
+        to=TWILIO_TO_PHONE
+    )
+    return msg.sid
+
+def async_notify(risk_level, sensor_id, location):
+    if risk_level == 'High Risk':
+        message = f"แจ้งเตือน! พบความเสี่ยงสูงที่ {sensor_id} ในพื้นที่ {location}"
+        send_line_notify(LINE_NOTIFY_TOKEN, message)
+        send_sms_twilio(message)
+
+# Database Model
+class SensorData(db.Model):
+    __tablename__ = 'sensor_data'
+
+    id = db.Column(db.Integer, primary_key=True)
+    sensor_id = db.Column(db.String(50), nullable=False)
+    latitude = db.Column(db.Float, nullable=False)
+    longitude = db.Column(db.Float, nullable=False)
+    temperature = db.Column(db.Float, nullable=False)
+    humidity = db.Column(db.Float, nullable=False)
+    chemical_level = db.Column(db.Float, nullable=False)
+    risk_level = db.Column(db.String(20), nullable=False)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'sensor_id': self.sensor_id,
+            'latitude': self.latitude,
+            'longitude': self.longitude,
+            'temperature': self.temperature,
+            'humidity': self.humidity,
+            'chemical_level': self.chemical_level,
+            'risk_level': self.risk_level,
+            'timestamp': self.timestamp.isoformat()
+        }
+
+@app.route('/api/sensor-data', methods=['POST'])
+@auth.login_required
+def receive_sensor_data():
+    data = request.json
+    required_fields = ['sensor_id', 'latitude', 'longitude', 'temperature', 'humidity', 'chemical_level']
+    for field in required_fields:
+        if field not in data:
+            return jsonify({'error': f'Missing field {field}'}), 400
+
+    X = [[data['temperature'], data['humidity'], data['chemical_level']]]
+    pred = model.predict(X)[0]
+    risk_level = 'High Risk' if pred == 1 else 'Low Risk'
+
+    sensor_record = SensorData(
+        sensor_id=data['sensor_id'],
+        latitude=data['latitude'],
+        longitude=data['longitude'],
+        temperature=data['temperature'],
+        humidity=data['humidity'],
+        chemical_level=data['chemical_level'],
+        risk_level=risk_level
+    )
+    db.session.add(sensor_record)
+    db.session.commit()
+
+    Thread(target=async_notify, args=(risk_level, data['sensor_id'], "พื้นที่มาบตาพุด")).start()
+
+    return jsonify({'message': 'Data saved', 'risk_level': risk_level}), 201
+
+@app.route('/api/sensor-data', methods=['GET'])
+@auth.login_required
+def get_sensor_data():
+    sensors = SensorData.query.order_by(SensorData.timestamp.desc()).limit(100).all()
+    return jsonify([s.to_dict() for s in sensors]), 200
+
+if __name__ == '__main__':
+    with app.app_context():
+        db.create_all()
+    app.run(host='0.0.0.0', port=5000, debug=True)
